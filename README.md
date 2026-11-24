@@ -111,3 +111,65 @@ print(result.model_dump())
 ```
 
 API 형식은 [OpenAI 공식 Structured Outputs 문서](https://developers.openai.com/api/docs/guides/structured-outputs)를 따릅니다.
+
+---
+
+# Ingredient contribution evaluator
+
+레시피 하나의 재료별 기여도(0~1)를 OpenAI API로 평가해, recipe-recommendation 2단계 모델의 예측 기여도와 비교하는 데 사용합니다.
+
+- 기여도 정의: 재료를 빼거나 중립적인 재료로 바꿨을 때 완성된 요리가 얼마나 달라지는가 (요리 정체성 > 구조 > 핵심 맛 순으로 고려)
+- 요청 단위: 레시피 1개 = 요청 1개 (같은 레시피 안의 재료를 함께 비교)
+- 프롬프트 버전: `ingredient-contribution-v1` (`src/prompts.py`)
+
+## 입력
+
+| 파일 | 내용 |
+|---|---|
+| `data/v3/ingredients_contribution.csv` | 레시피–재료 정답 기여도 (recipe-recommendation `data/stage2/`에서 복사) |
+| `data/v3/recipes_masked_v3.csv` | 레시피 제목·원재료 목록·마스킹된 조리법 (recipe-recommendation `data/stage1/v3/`에서 복사) |
+
+모델에 보내는 값: 제목, 원재료 목록, 조리법, 평가 대상 재료(기여도 CSV의 정규화된 이름)
+
+- 조리법의 `[MASK:I{k}|카테고리|역할]`은 원재료 목록의 k번째 이름으로 복원하고, 카테고리·역할 문자열은 보내지 않습니다
+- 정답 기여도와 테스트 분할 여부는 보내지 않습니다
+
+## 평가 대상
+
+recipe-recommendation의 2단계 테스트 분할(`seed=42`, `test_ratio=0.15`)을 같은 방식으로 재현해, 테스트 재료가 `--min-test-pairs`개(기본 2) 이상인 레시피만 평가합니다.
+
+| `--min-test-pairs` | 레시피 | 평가 재료 | 그중 테스트 재료 |
+|---|---|---|---|
+| 0 (전체) | 2,779 | 19,603 | 2,940 |
+| 1 | 1,767 | 14,385 | 2,940 |
+| 2 (기본) | 801 | 7,519 | 1,974 |
+| 3 | 280 | 2,939 | 932 |
+
+## 실행
+
+```bash
+# API 호출 없이 입력 확인
+python -m src.evaluate_contributions --dry-run --limit 2
+
+# 파일럿 (사용료 발생)
+python -m src.evaluate_contributions --limit 20 --output outputs/v3/contribution_pilot.csv
+
+# 전체
+python -m src.evaluate_contributions --output outputs/v3/contribution_scores.csv
+```
+
+옵션: `--contributions`, `--recipes`, `--output`, `--model`, `--min-test-pairs`, `--seed`, `--test-ratio`, `--offset`(필터 후 건너뛸 레시피 수), `--limit`, `--dry-run`
+
+- 응답의 재료 이름이 평가 대상과 정확히 맞지 않으면(누락·중복·추가) 최대 3번까지 다시 요청하고, 그래도 맞지 않으면 실패로 멈춥니다. 대소문자·앞뒤 공백 차이는 허용합니다
+- 실패 시 완료한 레시피는 보존되고 재시작할 `--offset`을 안내합니다 (유사도 평가와 동일)
+
+## 출력 (`outputs/v3/contribution_scores.csv`, 재료 1개 = 1행)
+
+| 열 | 내용 |
+|---|---|
+| `recipe_id`, `recipe_name`, `ingredient` | 레시피와 재료 (재료는 정규화된 이름) |
+| `label_contribution` | 정답 기여도 |
+| `ai_contribution` | 모델 평가 기여도 0~1 |
+| `is_test` | 2단계 테스트 분할 재료이면 1 (모델 예측과 비교할 대상) |
+| `explanation` | 레시피 단위 영어 설명 (같은 레시피 행에 반복) |
+| `model`, `response_id`, `prompt_version` | 재현용 정보 |
